@@ -43,9 +43,6 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
-    # Storage
-    database_url: str = "sqlite:///./trades.db"
-
     # Notifications (optional)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""

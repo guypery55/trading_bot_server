@@ -6,7 +6,6 @@ import pandas as pd
 from broker.base import BrokerInterface
 from data.market_data import MarketDataFeed
 from portfolio.portfolio_tracker import PortfolioTracker
-from storage.trade_logger import TradeLogger
 from strategy.base import BaseStrategy
 from .risk_manager import RiskManager
 
@@ -33,7 +32,6 @@ class TradingEngine:
         risk_manager: RiskManager,
         market_data: MarketDataFeed,
         portfolio: PortfolioTracker,
-        trade_logger: TradeLogger,
         notifier=None,          # Optional notifier (e.g. TelegramNotifier)
     ) -> None:
         self._broker = broker
@@ -41,7 +39,6 @@ class TradingEngine:
         self._risk = risk_manager
         self._market_data = market_data
         self._portfolio = portfolio
-        self._trade_logger = trade_logger
         self._notifier = notifier
         self._running = False
 
@@ -51,8 +48,6 @@ class TradingEngine:
         self._running = True
 
         await self._broker.connect()
-        await self._trade_logger.init()
-
         self._strategy.on_start()
 
         # Load historical bars to warm up indicators
@@ -79,7 +74,6 @@ class TradingEngine:
         self._strategy.on_stop()
         await self._market_data.stop_streaming()
         await self._broker.disconnect()
-        await self._trade_logger.close()
         logger.info("Engine stopped.")
 
     async def _on_new_bar(self, bars: pd.DataFrame) -> None:
@@ -98,7 +92,6 @@ class TradingEngine:
                 continue
 
             self._portfolio.record_fill(fill)
-            await self._trade_logger.log_fill(fill)
 
             if self._notifier:
                 try:

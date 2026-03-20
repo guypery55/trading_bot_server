@@ -15,7 +15,6 @@ from data.market_data import MarketDataFeed
 from engine.risk_manager import RiskManager
 from engine.trading_engine import TradingEngine
 from portfolio.portfolio_tracker import PortfolioTracker
-from storage.trade_logger import TradeLogger
 from strategy.base import BaseStrategy
 from strategy.breakout_strategy import BreakoutStrategy
 from strategy.rsi_macd_strategy import RSIMACDStrategy
@@ -58,7 +57,6 @@ async def main() -> None:
     strategy = build_strategy(settings)
     risk_manager = RiskManager()
     portfolio = PortfolioTracker()
-    trade_logger = TradeLogger(settings.database_url)
     market_data = MarketDataFeed(broker.ib, settings.symbol, settings.bar_size)
 
     # Optional Telegram notifier
@@ -74,7 +72,6 @@ async def main() -> None:
         risk_manager=risk_manager,
         market_data=market_data,
         portfolio=portfolio,
-        trade_logger=trade_logger,
         notifier=notifier,
     )
 
