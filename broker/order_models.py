@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pydantic import BaseModel, Field
 import uuid
@@ -42,7 +42,7 @@ class Fill(BaseModel):
     filled_quantity: float
     average_price: float
     commission: float = 0.0
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     model_config = {"frozen": True}
 

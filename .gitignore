@@ -39,11 +39,12 @@ package-lock.json
 logs/
 *.log
 
-# Data / cache
-data/
+# Data / cache (but not the data/ Python package)
 *.db
 *.sqlite
 *.sqlite3
+*.csv
+*.parquet
 
 # IDE
 .vscode/

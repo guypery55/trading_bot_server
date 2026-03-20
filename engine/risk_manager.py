@@ -12,6 +12,11 @@ class RiskManager:
     - Max position size per symbol
     - Daily loss limit (stops all trading if breached)
     - Prevents adding to an already-open position in the same direction
+
+    Daily loss tracking uses an internal snapshot: on reset, the current
+    portfolio P&L is recorded as the baseline, and subsequent checks compare
+    the delta against the daily limit. This prevents the bug where lifetime
+    cumulative losses would permanently halt trading after a daily reset.
     """
 
     def __init__(
@@ -21,7 +26,7 @@ class RiskManager:
     ) -> None:
         self._max_position_size = max_position_size
         self._daily_loss_limit = daily_loss_limit
-        self._daily_loss: float = 0.0
+        self._pnl_at_day_start: float = 0.0  # snapshot of realized_pnl at reset
         self._trading_halted: bool = False
 
     def validate(self, order: Order, portfolio: PortfolioTracker) -> Order | None:
@@ -33,13 +38,14 @@ class RiskManager:
             logger.warning("Order BLOCKED — trading halted due to daily loss limit.")
             return None
 
-        # Check daily loss limit
-        if portfolio.realized_pnl < -abs(self._daily_loss_limit):
+        # Check daily loss limit (delta from start of day, not lifetime)
+        daily_pnl = portfolio.realized_pnl - self._pnl_at_day_start
+        if daily_pnl < -abs(self._daily_loss_limit):
             self._trading_halted = True
             logger.error(
-                "Daily loss limit of %.2f breached (P&L: %.2f). Halting all trading.",
+                "Daily loss limit of %.2f breached (today's P&L: %.2f). Halting all trading.",
                 self._daily_loss_limit,
-                portfolio.realized_pnl,
+                daily_pnl,
             )
             return None
 
@@ -60,8 +66,13 @@ class RiskManager:
 
         return order
 
-    def reset_daily_limits(self) -> None:
-        """Call this at the start of each trading day."""
-        self._daily_loss = 0.0
+    def reset_daily_limits(self, portfolio: PortfolioTracker) -> None:
+        """Call this at the start of each trading day.
+
+        Snapshots the current P&L so that daily loss tracking starts fresh.
+        """
+        self._pnl_at_day_start = portfolio.realized_pnl
         self._trading_halted = False
-        logger.info("Daily risk limits reset.")
+        logger.info(
+            "Daily risk limits reset. P&L baseline: %.2f", self._pnl_at_day_start
+        )

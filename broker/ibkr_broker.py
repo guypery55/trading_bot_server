@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ib_insync import IB, LimitOrder, MarketOrder, StopOrder, Stock, Trade
 
@@ -148,13 +148,13 @@ class IBKRBroker(BrokerInterface):
             )
             filled_qty = sum(f.execution.shares for f in fills)
             commission = sum(f.commissionReport.commission for f in fills if f.commissionReport)
-            ts = fills[-1].time if fills else datetime.utcnow()
+            ts = fills[-1].time
         else:
             # Fallback for paper trading simulation where fills may not be immediate
             avg_price = original_order.limit_price or 0.0
             filled_qty = original_order.quantity
             commission = 0.0
-            ts = datetime.utcnow()
+            ts = datetime.now(timezone.utc)
 
         return Fill(
             order_id=str(trade.order.orderId),

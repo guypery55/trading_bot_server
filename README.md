@@ -6,10 +6,9 @@ An automated trading bot for Interactive Brokers (IBKR) built in Python. Support
 
 - **IBKR connectivity** via `ib_insync` (TWS and IB Gateway)
 - **Paper trading** via IBKR's built-in paper account (port 7497)
-- **Two strategies out of the box**: RSI+MACD and Breakout
-- **Risk management**: max position size, daily loss limit
-- **Trade logging** to SQLite
-- **Telegram notifications** (optional)
+- **Three strategies out of the box**: RSI+MACD, Breakout, and Swing
+- **Risk management**: max position size, daily loss limit, ATR-based stops
+- **Telegram notifications** — trade fill alerts + log forwarding (INFO/ERROR/CRITICAL)
 - **Fully testable** — strategies and risk logic work without a live IBKR connection
 
 ## Requirements
@@ -54,9 +53,8 @@ An automated trading bot for Interactive Brokers (IBKR) built in Python. Support
 | `TRADING_MODE` | `paper` or `live` | `paper` |
 | `SYMBOL` | Trading symbol (e.g. `AAPL`, `SPY`) | `AAPL` |
 | `BAR_SIZE` | IBKR bar size string | `5 mins` |
-| `STRATEGY` | `rsi_macd` or `breakout` | `rsi_macd` |
+| `STRATEGY` | `rsi_macd`, `breakout`, or `swing` | `rsi_macd` |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR` | `INFO` |
-| `DATABASE_URL` | SQLite path for trade logs | `sqlite:///./trades.db` |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (optional) | — |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID (optional) | — |
 
@@ -79,6 +77,31 @@ Identifies consolidation ranges and trades the breakout:
 - **BUY** when close breaks above the 20-bar high (+ 0.1% buffer)
 - **SELL** when close breaks below the 20-bar low (- 0.1% buffer)
 
+### `swing` — Multi-Signal Confluence Swing Trading
+Holds positions for days to weeks. Enters only when **5 independent signals** align:
+1. **Trend filter** — price above/below 50 EMA
+2. **Momentum shift** — 9 EMA crosses 21 EMA
+3. **RSI sweet spot** — RSI between 40–60 (not overbought/oversold)
+4. **Volume surge** — volume > 120% of 20-bar average
+5. **MACD acceleration** — histogram positive & increasing
+
+Exit conditions:
+- **ATR stop-loss** (2× ATR) and **take-profit** (3× ATR, 1.5:1 R:R)
+- **Trailing stop** activates after 1.5× ATR profit
+- **Trend invalidation** if price crosses back through 50 EMA
+- **Time stop** after max hold period
+
+## Telegram Notifications
+
+When `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set in `.env`, the bot will:
+- Send **trade fill alerts** (buy/sell, price, quantity, commission)
+- Forward **INFO, ERROR, and CRITICAL** log messages to your Telegram chat
+
+To set up a Telegram bot:
+1. Message **@BotFather** on Telegram → `/newbot`
+2. Copy the bot token into `.env`
+3. Send any message to your bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your chat ID
+
 ## Project Structure
 
 ```
@@ -86,11 +109,12 @@ trading_bot_server/
 ├── main.py              # Entry point & composition root
 ├── config/              # Settings (Pydantic BaseSettings) + logging
 ├── broker/              # BrokerInterface ABC + IBKRBroker implementation
-├── strategy/            # BaseStrategy + RSI/MACD + Breakout + indicators/
+├── strategy/            # BaseStrategy + RSI/MACD + Breakout + Swing + indicators/
 ├── engine/              # TradingEngine + RiskManager
 ├── data/                # MarketDataFeed (historical + real-time bars)
 ├── portfolio/           # PortfolioTracker (in-memory positions + P&L)
-├── storage/             # TradeLogger (SQLite via aiosqlite)
+├── notifications/       # TelegramNotifier (async trade alerts)
+├── utils/               # Sync Telegram helper for logging handler
 ├── tests/               # pytest tests (no IBKR connection needed)
 └── logs/                # Runtime log files (gitignored)
 ```

@@ -68,6 +68,31 @@ class TestRiskManager:
         # First validate — should be halted
         assert rm.validate(make_order(), portfolio) is None
 
-        # Reset — should pass again
-        rm.reset_daily_limits()
+        # Reset with current portfolio — snapshots the P&L baseline
+        rm.reset_daily_limits(portfolio)
+        # Should pass again because daily delta is now 0
         assert rm.validate(make_order(), portfolio) is not None
+
+    def test_daily_loss_tracks_delta_not_lifetime(self):
+        """After reset, only losses incurred today should count."""
+        rm = RiskManager(daily_loss_limit=100.0)
+        portfolio = PortfolioTracker()
+
+        # Day 1: lose 200 (halts trading)
+        portfolio.record_fill(make_fill(OrderSide.BUY, 10, 200.0))
+        portfolio.record_fill(make_fill(OrderSide.SELL, 10, 180.0))
+        assert rm.validate(make_order(), portfolio) is None
+
+        # Day 2: reset — lifetime P&L is still -200 but daily delta is 0
+        rm.reset_daily_limits(portfolio)
+        assert rm.validate(make_order(), portfolio) is not None
+
+        # Day 2: lose another 50 — still within daily limit of 100
+        portfolio.record_fill(make_fill(OrderSide.BUY, 10, 100.0))
+        portfolio.record_fill(make_fill(OrderSide.SELL, 10, 95.0))  # -50 today
+        assert rm.validate(make_order(), portfolio) is not None
+
+        # Day 2: lose another 60 — now -110 today, exceeds limit
+        portfolio.record_fill(make_fill(OrderSide.BUY, 10, 100.0))
+        portfolio.record_fill(make_fill(OrderSide.SELL, 10, 94.0))  # -110 today total
+        assert rm.validate(make_order(), portfolio) is None

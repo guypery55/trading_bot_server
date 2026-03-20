@@ -1,9 +1,11 @@
+"""Synchronous Telegram helper for use in logging handlers.
+
+For async notification of trade fills, use notifications.telegram_notifier instead.
+"""
+
 import os
+
 import httpx
-
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
@@ -11,14 +13,20 @@ TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 def send_telegram_message(text: str) -> bool:
     """Send a plain-text message to the configured Telegram chat.
 
+    Reads TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from the environment
+    at call time (not import time) so that .env loading order doesn't matter.
+
     Returns True on success, False on failure (never raises).
     """
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
         return False
 
-    url = TELEGRAM_API_URL.format(token=TELEGRAM_BOT_TOKEN)
+    url = TELEGRAM_API_URL.format(token=token)
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
     }

@@ -16,13 +16,13 @@ class TradingEngine:
     """Orchestrates the trading loop.
 
     Wires together: broker, strategy, risk manager, market data, portfolio,
-    storage, and optional notifications. All dependencies are injected —
+    and optional notifications. All dependencies are injected —
     no globals, no singletons.
 
     Flow on each new bar:
         market_data → strategy.on_bar() → risk_manager.validate()
         → broker.place_order() → portfolio.record_fill()
-        → trade_logger.log_fill() → notifier.send_fill_alert()
+        → notifier.send_fill_alert()
     """
 
     def __init__(
