@@ -18,12 +18,14 @@ from portfolio.portfolio_tracker import PortfolioTracker
 from strategy.base import BaseStrategy
 from strategy.breakout_strategy import BreakoutStrategy
 from strategy.rsi_macd_strategy import RSIMACDStrategy
+from strategy.swing_strategy import SwingStrategy
 
 # ── Strategy registry ─────────────────────────────────────────────────────────
 # Add new strategies here. One line per strategy, no other files need to change.
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "rsi_macd": RSIMACDStrategy,
     "breakout": BreakoutStrategy,
+    "swing": SwingStrategy,
 }
 
 logger = logging.getLogger(__name__)
