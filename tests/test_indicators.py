@@ -55,8 +55,13 @@ class TestRSI:
         assert len(result) == len(price_series)
 
     def test_trending_up_gives_high_rsi(self):
-        """Monotonically rising prices should yield RSI near 100."""
-        series = pd.Series([float(i) for i in range(1, 51)])
+        """Strongly trending up prices should yield RSI above 70."""
+        # Use a series with occasional small dips so avg_loss is non-zero
+        import numpy as np
+        rng = np.random.default_rng(0)
+        base = np.linspace(100, 200, 50)
+        noise = rng.uniform(-0.1, 0.5, 50)  # mostly upward noise
+        series = pd.Series(base + noise)
         result = rsi(series, period=14)
         assert result.iloc[-1] > 70
 

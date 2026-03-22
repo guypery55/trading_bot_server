@@ -18,5 +18,9 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
     avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
 
-    rs = avg_gain / avg_loss.replace(0, float("inf"))
-    return 100 - (100 / (1 + rs))
+    # When avg_loss == 0: all gains, no losses → RSI = 100
+    # Use NaN as intermediate to avoid 0/0 and then fill correctly
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    result = 100 - (100 / (1 + rs))
+    result[avg_loss == 0] = 100.0
+    return result
