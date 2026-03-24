@@ -1,6 +1,7 @@
-"""Async Telegram notifier for trade alerts and bot status updates."""
+"""Telegram helpers — sync logging helper + async notifier for trade alerts."""
 
 import logging
+import os
 
 import httpx
 
@@ -9,6 +10,30 @@ from broker.order_models import Fill
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
+
+
+# ── Sync helper (used by the logging handler) ───────────────────────────────
+
+def send_telegram_message(text: str) -> bool:
+    """Send a message synchronously. Reads credentials from env at call time.
+
+    Returns True on success, False on failure (never raises).
+    """
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if not token or not chat_id:
+        return False
+
+    url = TELEGRAM_API_URL.format(token=token)
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+
+    try:
+        response = httpx.post(url, json=payload, timeout=5)
+        response.raise_for_status()
+        return True
+    except httpx.HTTPError:
+        return False
 
 # Emoji per order side for quick scanning
 _SIDE_EMOJI = {"BUY": "🟢", "SELL": "🔴"}

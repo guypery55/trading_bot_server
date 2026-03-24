@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 
-from utils.telegram import send_telegram_message
+from notifications.telegram_notifier import send_telegram_message
 
 
 # ── Telegram logging handler ────────────────────────────────────────────────
