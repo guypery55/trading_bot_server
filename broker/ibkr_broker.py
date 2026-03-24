@@ -230,7 +230,12 @@ class IBKRBroker(BrokerInterface):
                 f"Timed out connecting to IBKR on port {self._settings.ibkr_port}. "
                 "Make sure IB Gateway is running with API connections enabled."
             )
-        logger.info("IBKR broker ready.")
+
+        # Request delayed market data (type 3) as fallback when the account
+        # doesn't have a real-time data subscription.  Type 4 = delayed-frozen.
+        # This avoids error 420 "No market data permissions for ISLAND STK".
+        self._app.reqMarketDataType(3)
+        logger.info("IBKR broker ready (market data: delayed).")
 
     async def disconnect(self) -> None:
         if self._app.isConnected():
