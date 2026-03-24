@@ -1,6 +1,5 @@
 # Broker connectivity
-ib_insync==0.9.86
-nest_asyncio==1.6.0
+ibapi==9.81.1.post1
 
 # Data / indicators
 pandas==2.2.2

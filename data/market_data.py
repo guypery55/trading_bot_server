@@ -1,121 +1,135 @@
+from __future__ import annotations
+
 import asyncio
 import logging
+import threading
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
 
 import pandas as pd
-from ib_insync import IB, BarData, RealTimeBar, Stock
+from ibapi.contract import Contract
 
 logger = logging.getLogger(__name__)
 
-# Type alias for the bar callback the engine registers
+# Type alias for the bar callback registered by the engine
 BarCallback = Callable[[pd.DataFrame], Awaitable[None]]
 
 
 class MarketDataFeed:
-    """Fetches historical and real-time bar data from IBKR via ib_insync.
+    """Fetches historical and real-time bar data from IBKR via ibapi.
 
     Usage:
-        feed = MarketDataFeed(ib, symbol="AAPL", bar_size="5 mins")
+        feed = MarketDataFeed(broker, symbol="AAPL", bar_size="5 mins")
         await feed.load_history(lookback_days=30)
         feed.subscribe(engine._on_new_bar)
-        # Now on each new bar, engine._on_new_bar(bars_df) is awaited.
+        await feed.start_streaming()
     """
 
-    def __init__(self, ib: IB, symbol: str, bar_size: str = "5 mins") -> None:
-        self._ib = ib
+    def __init__(self, broker, symbol: str, bar_size: str = "5 mins") -> None:
+        # Importing here to avoid circular import at module level
+        from broker.ibkr_broker import IBKRBroker
+        self._broker: IBKRBroker = broker
         self._symbol = symbol
         self._bar_size = bar_size
-        self._contract = Stock(symbol, "SMART", "USD")
         self._bars: list[dict] = []
         self._callbacks: list[BarCallback] = []
-        self._realtime_bars = None
+        self._realtime_req_id: int | None = None
 
-    # ── Historical data ───────────────────────────────────────────────────────
+    # ── Historical data ────────────────────────────────────────────────────────
 
     async def load_history(self, lookback_days: int = 30) -> pd.DataFrame:
-        """Fetch historical bars and store them as the initial bar buffer."""
-        end_dt = datetime.now()
+        """Fetch historical OHLCV bars and populate the internal bar buffer."""
+        req_id = self._broker.next_req_id()
+        app = self._broker.app
+
+        app._hist_bars[req_id] = []
+        event = threading.Event()
+        app._hist_events[req_id] = event
+
+        contract = self._make_contract()
         duration = f"{lookback_days} D"
 
         logger.info(
-            "Fetching %s days of historical bars for %s (%s)...",
-            lookback_days,
-            self._symbol,
+            "Fetching %s days of history for %s (%s)...",
+            lookback_days, self._symbol, self._bar_size,
+        )
+
+        app.reqHistoricalData(
+            req_id,
+            contract,
+            "",             # endDateTime — empty string means "now"
+            duration,
             self._bar_size,
+            "TRADES",
+            1,              # useRTH
+            1,              # formatDate (1 = yyyyMMdd HH:mm:ss)
+            False,          # keepUpToDate
+            [],             # chartOptions
         )
 
-        raw = await self._ib.reqHistoricalDataAsync(
-            contract=self._contract,
-            endDateTime=end_dt,
-            durationStr=duration,
-            barSizeSetting=self._bar_size,
-            whatToShow="TRADES",
-            useRTH=True,
-            formatDate=1,
+        done = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: event.wait(timeout=30)
         )
+        if not done:
+            logger.warning("Timed out waiting for historical data for %s.", self._symbol)
+            return self.to_dataframe()
 
-        self._bars = [self._bar_to_dict(b) for b in raw]
-        logger.info("Loaded %s historical bars.", len(self._bars))
+        self._bars = app._hist_bars.get(req_id, [])
+        logger.info("Loaded %s historical bars for %s.", len(self._bars), self._symbol)
         return self.to_dataframe()
 
-    # ── Real-time subscription ────────────────────────────────────────────────
+    # ── Real-time streaming ────────────────────────────────────────────────────
 
     def subscribe(self, callback: BarCallback) -> None:
-        """Register a callback to be called on each new completed bar."""
+        """Register a coroutine callback to be called on each new real-time bar."""
         self._callbacks.append(callback)
 
     async def start_streaming(self) -> None:
-        """Subscribe to real-time 5-second bars and bridge into the bar_size aggregator."""
-        logger.info("Starting real-time bar stream for %s.", self._symbol)
-        self._realtime_bars = self._ib.reqRealTimeBars(
-            contract=self._contract,
-            barSize=5,           # IBKR only supports 5-second real-time bars
-            whatToShow="TRADES",
-            useRTH=True,
+        """Subscribe to real-time 5-second bars from IBKR."""
+        req_id = self._broker.next_req_id()
+        self._realtime_req_id = req_id
+
+        loop = asyncio.get_running_loop()
+
+        def _on_bar(bar_dict: dict) -> None:
+            """Called from ibapi thread via call_soon_threadsafe."""
+            self._bars.append(bar_dict)
+            df = self.to_dataframe()
+            for cb in self._callbacks:
+                asyncio.ensure_future(cb(df), loop=loop)
+
+        self._broker.app.on_realtime_bar = _on_bar
+
+        logger.info("Starting real-time bar stream for %s (req_id=%s).", self._symbol, req_id)
+        self._broker.app.reqRealTimeBars(
+            req_id,
+            self._make_contract(),
+            5,          # barSize — ibapi only supports 5-second bars here
+            "TRADES",
+            True,       # useRTH
+            [],         # realTimeBarsOptions
         )
-        self._realtime_bars.updateEvent += self._on_realtime_bar
 
     async def stop_streaming(self) -> None:
-        if self._realtime_bars is not None:
-            self._ib.cancelRealTimeBars(self._realtime_bars)
+        """Cancel the real-time bar subscription."""
+        if self._realtime_req_id is not None:
+            self._broker.app.cancelRealTimeBars(self._realtime_req_id)
+            self._broker.app.on_realtime_bar = None
             logger.info("Stopped real-time bar stream for %s.", self._symbol)
 
-    # ── Internal ──────────────────────────────────────────────────────────────
-
-    def _on_realtime_bar(self, bars, has_new_bar: bool) -> None:
-        """Called by ib_insync on each new 5-second bar update."""
-        if not has_new_bar or not bars:
-            return
-        latest: RealTimeBar = bars[-1]
-        self._bars.append({
-            "date": latest.time,
-            "open": latest.open_,
-            "high": latest.high,
-            "low": latest.low,
-            "close": latest.close,
-            "volume": latest.volume,
-        })
-        df = self.to_dataframe()
-        for cb in self._callbacks:
-            asyncio.ensure_future(cb(df))
+    # ── Helpers ────────────────────────────────────────────────────────────────
 
     def to_dataframe(self) -> pd.DataFrame:
-        """Return the current bar buffer as a DataFrame."""
+        """Return the current bar buffer as a sorted DataFrame."""
         if not self._bars:
             return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
         df = pd.DataFrame(self._bars)
         df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").reset_index(drop=True)
-        return df
+        return df.sort_values("date").reset_index(drop=True)
 
-    @staticmethod
-    def _bar_to_dict(bar: BarData) -> dict:
-        return {
-            "date": bar.date,
-            "open": bar.open,
-            "high": bar.high,
-            "low": bar.low,
-            "close": bar.close,
-            "volume": bar.volume,
-        }
+    def _make_contract(self) -> Contract:
+        c = Contract()
+        c.symbol = self._symbol
+        c.secType = "STK"
+        c.exchange = "SMART"
+        c.currency = "USD"
+        return c

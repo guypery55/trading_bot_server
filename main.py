@@ -59,7 +59,7 @@ async def main() -> None:
     strategy = build_strategy(settings)
     risk_manager = RiskManager()
     portfolio = PortfolioTracker()
-    market_data = MarketDataFeed(broker.ib, settings.symbol, settings.bar_size)
+    market_data = MarketDataFeed(broker, settings.symbol, settings.bar_size)
 
     # Optional Telegram notifier
     notifier = None
