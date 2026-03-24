@@ -10,7 +10,6 @@ from ibapi.contract import Contract
 from ibapi.execution import Execution
 from ibapi.order import Order as IBOrder
 from ibapi.wrapper import EWrapper
-
 from config.settings import Settings
 from .base import BrokerInterface
 from .order_models import AccountSummary, Fill, Order, OrderSide, OrderType, Position
@@ -102,31 +101,20 @@ class _IBKRApp(EWrapper, EClient):
         if reqId in self._hist_events:
             self._hist_events[reqId].set()
 
-    # ── Real-time bars ─────────────────────────────────────────────────────────
+    # ── Streaming bars (via historicalData keepUpToDate) ─────────────────────
 
-    def realtimeBar(
-        self,
-        reqId: int,
-        time: int,
-        open_: float,
-        high: float,
-        low: float,
-        close: float,
-        volume: int,
-        wap: float,
-        count: int,
-    ) -> None:
+    def historicalDataUpdate(self, reqId: int, bar) -> None:
+        """Called for each live bar update when keepUpToDate=True."""
         if self.on_realtime_bar and self._loop:
-            bar = {
-                "date": datetime.fromtimestamp(time, tz=timezone.utc),
-                "open": open_,
-                "high": high,
-                "low": low,
-                "close": close,
-                "volume": volume,
+            bar_dict = {
+                "date": bar.date,
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
             }
-            # Schedule callback safely onto the asyncio event loop
-            self._loop.call_soon_threadsafe(self.on_realtime_bar, bar)
+            self._loop.call_soon_threadsafe(self.on_realtime_bar, bar_dict)
 
     # ── Orders ─────────────────────────────────────────────────────────────────
 

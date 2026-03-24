@@ -82,7 +82,12 @@ class MarketDataFeed:
         self._callbacks.append(callback)
 
     async def start_streaming(self) -> None:
-        """Subscribe to real-time 5-second bars from IBKR."""
+        """Stream live bars using reqHistoricalData with keepUpToDate=True.
+
+        Unlike reqRealTimeBars (which needs real-time permissions and only
+        supports 5-second bars), keepUpToDate respects reqMarketDataType(3)
+        so it works with delayed data on paper accounts.
+        """
         req_id = self._broker.next_req_id()
         self._realtime_req_id = req_id
 
@@ -97,22 +102,26 @@ class MarketDataFeed:
 
         self._broker.app.on_realtime_bar = _on_bar
 
-        logger.info("Starting real-time bar stream for %s (req_id=%s).", self._symbol, req_id)
-        self._broker.app.reqRealTimeBars(
+        logger.info("Starting streaming bars for %s (%s, req_id=%s).", self._symbol, self._bar_size, req_id)
+        self._broker.app.reqHistoricalData(
             req_id,
             self._make_contract(),
-            5,          # barSize — ibapi only supports 5-second bars here
+            "",                 # endDateTime — empty = now
+            "60 S",             # durationStr — small window, keepUpToDate streams from here
+            self._bar_size,
             "TRADES",
-            True,       # useRTH
-            [],         # realTimeBarsOptions
+            1,                  # useRTH
+            1,                  # formatDate
+            True,               # keepUpToDate — this is the key: streams live updates
+            [],                 # chartOptions
         )
 
     async def stop_streaming(self) -> None:
-        """Cancel the real-time bar subscription."""
+        """Cancel the streaming historical data subscription."""
         if self._realtime_req_id is not None:
-            self._broker.app.cancelRealTimeBars(self._realtime_req_id)
+            self._broker.app.cancelHistoricalData(self._realtime_req_id)
             self._broker.app.on_realtime_bar = None
-            logger.info("Stopped real-time bar stream for %s.", self._symbol)
+            logger.info("Stopped bar stream for %s.", self._symbol)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
