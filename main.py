@@ -45,7 +45,7 @@ def build_feeds(
         )
 
     feeds = []
-    for symbol in settings.symbols:
+    for symbol in settings.symbol_list:
         feed = MarketDataFeed(broker, symbol, settings.bar_size)
         strategy = strategy_cls(symbol=symbol)
         feeds.append((feed, strategy))
@@ -62,7 +62,8 @@ async def main() -> None:
     logger.info("  Trading Bot Server")
     logger.info("  Mode      : %s", settings.trading_mode.value.upper())
     logger.info("  Strategy  : %s", settings.strategy)
-    logger.info("  Symbols   : %d  (%s)", len(settings.symbols), ", ".join(settings.symbols[:5]) + ("..." if len(settings.symbols) > 5 else ""))
+    symbols = settings.symbol_list
+    logger.info("  Symbols   : %d  (%s)", len(symbols), ", ".join(symbols[:5]) + ("..." if len(symbols) > 5 else ""))
     logger.info("  Spend cap : $%.2f / day", settings.daily_spend_limit)
     logger.info("  Loss limit: $%.2f / day", settings.daily_loss_limit)
     logger.info("  IBKR      : %s:%s (clientId=%s)", settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id)

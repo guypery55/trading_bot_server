@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from pydantic import field_validator, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     # Trading
     trading_mode: TradingMode = TradingMode.PAPER
-    symbols: list[str] = ["AAPL"]
+    symbols: str = "AAPL"       # comma-separated — use .symbol_list for a list
     bar_size: str = "5 mins"
     strategy: str = "swing"
 
@@ -53,13 +53,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
-    @field_validator("symbols", mode="before")
-    @classmethod
-    def parse_symbols(cls, v: object) -> list[str]:
-        """Accept comma-separated string from .env or a plain list."""
-        if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
-        return v  # type: ignore[return-value]
+    @property
+    def symbol_list(self) -> list[str]:
+        """Return symbols as a list, split on commas."""
+        return [s.strip() for s in self.symbols.split(",") if s.strip()]
 
     @model_validator(mode="after")
     def resolve_port(self) -> Settings:
