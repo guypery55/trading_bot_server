@@ -66,10 +66,10 @@ class SwingStrategy(BaseStrategy):
         "ema_fast": 9,
         "ema_mid": 21,
         "ema_slow": 50,
-        # RSI
+        # RSI — wider zone catches more setups without chasing extremes
         "rsi_period": 14,
-        "rsi_entry_low": 40,
-        "rsi_entry_high": 60,
+        "rsi_entry_low": 35,
+        "rsi_entry_high": 65,
         # MACD
         "macd_fast": 12,
         "macd_slow": 26,
@@ -80,11 +80,11 @@ class SwingStrategy(BaseStrategy):
         "atr_tp_mult": 3.0,
         "atr_trail_trigger": 1.5,
         "atr_trail_dist": 1.5,
-        # Volume
+        # Volume — 1.0 means any volume passes; raises naturally on real moves
         "volume_period": 20,
-        "volume_factor": 1.2,
-        # Position management
-        "max_hold_bars": 60,
+        "volume_factor": 1.0,
+        # Position management — faster turnover, more opportunities
+        "max_hold_bars": 20,
         "order_quantity": 1,
     }
 
@@ -181,9 +181,8 @@ class SwingStrategy(BaseStrategy):
             current_close > ema_slow_s.iloc[-1]          # above macro trend
             and ema_fast_cross_above_mid                   # momentum shift
             and rsi_in_zone                                # not overbought
-            and volume_surge                               # institutional interest
+            and volume_surge                               # volume confirms
             and current_hist > 0                           # MACD positive
-            and current_hist > prev_hist                   # and accelerating
         ):
             logger.info(
                 "LONG ENTRY — close=%.4f ema_slow=%.4f rsi=%.2f vol=%d avg_vol=%d hist=%.4f atr=%.4f",
@@ -208,9 +207,8 @@ class SwingStrategy(BaseStrategy):
             current_close < ema_slow_s.iloc[-1]           # below macro trend
             and ema_fast_cross_below_mid                    # momentum shift down
             and rsi_in_zone                                 # not oversold
-            and volume_surge                                # institutional interest
+            and volume_surge                                # volume confirms
             and current_hist < 0                            # MACD negative
-            and current_hist < prev_hist                    # and accelerating down
         ):
             logger.info(
                 "SHORT ENTRY — close=%.4f ema_slow=%.4f rsi=%.2f vol=%d avg_vol=%d hist=%.4f atr=%.4f",

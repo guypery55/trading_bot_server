@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from enum import Enum
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,15 +32,19 @@ class Settings(BaseSettings):
 
     # IBKR connection
     ibkr_host: str = "127.0.0.1"
-    ibkr_connection_type: ConnectionType = ConnectionType.TWS
-    ibkr_port: int | None = None          # None = auto-derive from mode + connection_type
+    ibkr_connection_type: ConnectionType = ConnectionType.GATEWAY
+    ibkr_port: int | None = None
     ibkr_client_id: int = 1
 
     # Trading
     trading_mode: TradingMode = TradingMode.PAPER
-    symbol: str = "AAPL"
+    symbols: list[str] = ["AAPL"]
     bar_size: str = "5 mins"
-    strategy: str = "rsi_macd"
+    strategy: str = "swing"
+
+    # Risk
+    daily_spend_limit: float = 1000.0   # max $ traded per day across all symbols
+    daily_loss_limit: float = 500.0     # halt trading if daily P&L drops below -this
 
     # Logging
     log_level: str = "INFO"
@@ -47,12 +53,19 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def parse_symbols(cls, v: object) -> list[str]:
+        """Accept comma-separated string from .env or a plain list."""
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v  # type: ignore[return-value]
+
     @model_validator(mode="after")
-    def resolve_port(self) -> "Settings":
-        """Auto-derive IBKR port from trading_mode + connection_type if not set explicitly."""
+    def resolve_port(self) -> Settings:
+        """Auto-derive IBKR port from trading_mode + connection_type if not set."""
         if self.ibkr_port is None:
             derived = _IBKR_PORTS[self.trading_mode][self.ibkr_connection_type]
-            # Pydantic frozen models don't allow assignment — use object.__setattr__
             object.__setattr__(self, "ibkr_port", derived)
         return self
 
