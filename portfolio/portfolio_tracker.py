@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 from broker.order_models import Fill, OrderSide, Position
 

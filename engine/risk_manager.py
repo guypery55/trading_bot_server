@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 from broker.order_models import Order, OrderSide
 from portfolio.portfolio_tracker import PortfolioTracker

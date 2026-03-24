@@ -1,8 +1,5 @@
-from __future__ import annotations
-
 import asyncio
 import logging
-import queue
 import threading
 from datetime import datetime, timezone
 
@@ -12,7 +9,6 @@ from ibapi.common import OrderId, TickerId
 from ibapi.contract import Contract
 from ibapi.execution import Execution
 from ibapi.order import Order as IBOrder
-from ibapi.order_state import OrderState
 from ibapi.wrapper import EWrapper
 
 from config.settings import Settings
@@ -226,7 +222,7 @@ class IBKRBroker(BrokerInterface):
         self._thread = threading.Thread(target=self._app.run, daemon=True, name="ibapi-thread")
         self._thread.start()
 
-        connected = await asyncio.get_event_loop().run_in_executor(
+        connected = await asyncio.get_running_loop().run_in_executor(
             None, lambda: self._app._connected.wait(timeout=15)
         )
         if not connected:
@@ -264,7 +260,7 @@ class IBKRBroker(BrokerInterface):
         )
         self._app.placeOrder(order_id, contract, ib_order)
 
-        filled = await asyncio.get_event_loop().run_in_executor(
+        filled = await asyncio.get_running_loop().run_in_executor(
             None, lambda: event.wait(timeout=30)
         )
         if not filled:
@@ -300,7 +296,7 @@ class IBKRBroker(BrokerInterface):
         self._app._positions_event.clear()
         self._app.reqPositions()
 
-        done = await asyncio.get_event_loop().run_in_executor(
+        done = await asyncio.get_running_loop().run_in_executor(
             None, lambda: self._app._positions_event.wait(timeout=10)
         )
         self._app.cancelPositions()
@@ -320,7 +316,7 @@ class IBKRBroker(BrokerInterface):
         self._app._account_event.clear()
         self._app.reqAccountSummary(req_id, "All", "NetLiquidation,BuyingPower,TotalCashValue")
 
-        done = await asyncio.get_event_loop().run_in_executor(
+        done = await asyncio.get_running_loop().run_in_executor(
             None, lambda: self._app._account_event.wait(timeout=10)
         )
         self._app.cancelAccountSummary(req_id)

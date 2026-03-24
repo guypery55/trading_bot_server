@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import logging
 import threading
@@ -66,7 +64,7 @@ class MarketDataFeed:
             [],             # chartOptions
         )
 
-        done = await asyncio.get_event_loop().run_in_executor(
+        done = await asyncio.get_running_loop().run_in_executor(
             None, lambda: event.wait(timeout=30)
         )
         if not done:
@@ -95,7 +93,7 @@ class MarketDataFeed:
             self._bars.append(bar_dict)
             df = self.to_dataframe()
             for cb in self._callbacks:
-                asyncio.ensure_future(cb(df), loop=loop)
+                loop.create_task(cb(df))
 
         self._broker.app.on_realtime_bar = _on_bar
 
