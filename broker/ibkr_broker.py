@@ -77,10 +77,11 @@ class _IBKRApp(EWrapper, EClient):
             return
         if errorCode == 502:
             logger.critical("Cannot connect to IBKR: %s", errorString)
-        elif errorCode == 162:
-            # Historical data request error — unblock waiting event
+        elif errorCode in {162, 366}:
+            # Historical data errors — always unblock the waiting event so we
+            # don't hang. 162 = HMDS error / pacing, 366 = no data found.
             if reqId in self._hist_events:
-                logger.warning("Historical data error for req %s: %s", reqId, errorString)
+                logger.warning("Historical data error for req %s (code %s): %s", reqId, errorCode, errorString)
                 self._hist_events[reqId].set()
         else:
             logger.error("IBKR error [req=%s code=%s]: %s", reqId, errorCode, errorString)
