@@ -65,7 +65,7 @@ class MarketDataFeed:
         )
 
         done = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: event.wait(timeout=30)
+            None, lambda: event.wait(timeout=60)
         )
         if not done:
             logger.warning("Timed out waiting for historical data for %s.", self._symbol)

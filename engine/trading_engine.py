@@ -57,11 +57,21 @@ class TradingEngine:
         for feed, strategy in self._feeds:
             strategy.on_start()
 
-        # Load history for all symbols concurrently
-        await asyncio.gather(*[
-            feed.load_history(lookback_days=60)
-            for feed, _ in self._feeds
-        ])
+        # Load history in batches of 5 to respect IBKR's pacing limit
+        # (~6 simultaneous historical data requests allowed).
+        batch_size = 5
+        all_feeds = [feed for feed, _ in self._feeds]
+        for i in range(0, len(all_feeds), batch_size):
+            batch = all_feeds[i : i + batch_size]
+            logger.info(
+                "Loading history — batch %d/%d (%s)...",
+                i // batch_size + 1,
+                -(-len(all_feeds) // batch_size),   # ceiling division
+                ", ".join(f._symbol for f in batch),
+            )
+            await asyncio.gather(*[feed.load_history(lookback_days=60) for feed in batch])
+            if i + batch_size < len(all_feeds):
+                await asyncio.sleep(2)   # 2 s between batches keeps us well under limits
 
         # Subscribe bar handlers and start streaming — stagger slightly to
         # avoid hitting IBKR's historical data pacing limits (50 req/10 s).
