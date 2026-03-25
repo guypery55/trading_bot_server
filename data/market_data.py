@@ -54,14 +54,14 @@ class MarketDataFeed:
         app.reqHistoricalData(
             req_id,
             contract,
-            "",             # endDateTime — empty string means "now"
+            "",                 # endDateTime — empty string means "now"
             duration,
             self._bar_size,
-            "TRADES",
-            1,              # useRTH
-            1,              # formatDate (1 = yyyyMMdd HH:mm:ss)
-            False,          # keepUpToDate
-            [],             # chartOptions
+            "ADJUSTED_LAST",   # works with delayed data; TRADES requires a subscription
+            1,                  # useRTH
+            1,                  # formatDate (1 = yyyyMMdd HH:mm:ss)
+            False,              # keepUpToDate
+            [],                 # chartOptions
         )
 
         done = await asyncio.get_running_loop().run_in_executor(
@@ -109,10 +109,10 @@ class MarketDataFeed:
             "",                 # endDateTime — empty = now
             "60 S",             # durationStr — small window, keepUpToDate streams from here
             self._bar_size,
-            "TRADES",
+            "ADJUSTED_LAST",   # consistent with history fetch; works with delayed data
             1,                  # useRTH
             1,                  # formatDate
-            True,               # keepUpToDate — this is the key: streams live updates
+            True,               # keepUpToDate — streams live bar updates
             [],                 # chartOptions
         )
 
