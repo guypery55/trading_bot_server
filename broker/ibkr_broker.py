@@ -1,372 +1,275 @@
 import asyncio
 import logging
-import threading
 from datetime import datetime, timezone
 
-from ibapi.client import EClient
-from ibapi.commission_report import CommissionReport
-from ibapi.common import OrderId, TickerId
-from ibapi.contract import Contract
-from ibapi.execution import Execution
-from ibapi.order import Order as IBOrder
-from ibapi.wrapper import EWrapper
+import httpx
+
 from config.settings import Settings
 from .base import BrokerInterface
-from .order_models import AccountSummary, Fill, Order, OrderSide, OrderType, Position
+from .order_models import AccountSummary, Fill, Order, OrderType, Position
 
 logger = logging.getLogger(__name__)
 
-# Error codes that are purely informational (market data farm messages etc.)
-_IGNORED_ERROR_CODES = {2104, 2106, 2107, 2108, 2119, 2158}
-
-
-class _IBKRApp(EWrapper, EClient):
-    """Low-level ibapi app that merges EWrapper callbacks with EClient requests.
-
-    Runs in its own background thread via EClient.run(). All state is
-    accessed from the asyncio thread through threading.Event / queue.Queue.
-    """
-
-    def __init__(self) -> None:
-        EWrapper.__init__(self)
-        EClient.__init__(self, wrapper=self)
-
-        # Connection
-        self._connected = threading.Event()
-        self._next_order_id: int = 1
-
-        # Historical data:  reqId -> list[bar_dict]
-        self._hist_bars: dict[int, list] = {}
-        self._hist_events: dict[int, threading.Event] = {}
-
-        # Order fills: orderId -> dict with execution info
-        self._fills: dict[int, dict] = {}
-        self._fill_events: dict[int, threading.Event] = {}
-
-        # Positions
-        self._positions: list[dict] = []
-        self._positions_event = threading.Event()
-
-        # Account summary
-        self._account_values: dict[str, str] = {}
-        self._account_event = threading.Event()
-
-        # Real-time bars: called from ibapi thread, scheduled on the asyncio loop
-        self.on_realtime_bar: callable | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
-
-    # ── Connection ─────────────────────────────────────────────────────────────
-
-    def nextValidId(self, orderId: OrderId) -> None:
-        self._next_order_id = orderId
-        self._connected.set()
-        logger.info("IBKR connected. Next valid order ID: %s", orderId)
-
-    def connectAck(self) -> None:
-        logger.debug("connectAck received.")
-
-    def error(
-        self,
-        reqId: TickerId,
-        errorCode: int,
-        errorString: str,
-        advancedOrderRejectJson: str = "",
-    ) -> None:
-        if errorCode in _IGNORED_ERROR_CODES:
-            logger.debug("IBKR info [%s]: %s", errorCode, errorString)
-            return
-        if errorCode == 502:
-            logger.critical("Cannot connect to IBKR: %s", errorString)
-        else:
-            # Always unblock historical data requests regardless of error code
-            # so we never hang for 60 s on an unexpected code.
-            if reqId in self._hist_events:
-                logger.warning(
-                    "Historical data error for req %s (code %s): %s — skipping symbol.",
-                    reqId, errorCode, errorString,
-                )
-                self._hist_events[reqId].set()
-            else:
-                logger.error("IBKR error [req=%s code=%s]: %s", reqId, errorCode, errorString)
-
-    # ── Historical data ────────────────────────────────────────────────────────
-
-    def historicalData(self, reqId: int, bar) -> None:
-        self._hist_bars.setdefault(reqId, []).append({
-            "date": bar.date,
-            "open": bar.open,
-            "high": bar.high,
-            "low": bar.low,
-            "close": bar.close,
-            "volume": bar.volume,
-        })
-
-    def historicalDataEnd(self, reqId: int, start: str, end: str) -> None:
-        if reqId in self._hist_events:
-            self._hist_events[reqId].set()
-
-    # ── Streaming bars (via historicalData keepUpToDate) ─────────────────────
-
-    def historicalDataUpdate(self, reqId: int, bar) -> None:
-        """Called for each live bar update when keepUpToDate=True."""
-        if self.on_realtime_bar and self._loop:
-            bar_dict = {
-                "date": bar.date,
-                "open": bar.open,
-                "high": bar.high,
-                "low": bar.low,
-                "close": bar.close,
-                "volume": bar.volume,
-            }
-            self._loop.call_soon_threadsafe(self.on_realtime_bar, bar_dict)
-
-    # ── Orders ─────────────────────────────────────────────────────────────────
-
-    def execDetails(self, reqId: int, contract: Contract, execution: Execution) -> None:
-        oid = execution.orderId
-        self._fills.setdefault(oid, {"executions": [], "commissions": [], "filled": False})
-        self._fills[oid]["executions"].append(execution)
-
-    def commissionReport(self, commissionReport: CommissionReport) -> None:
-        for data in self._fills.values():
-            for ex in data["executions"]:
-                if ex.execId == commissionReport.execId:
-                    data["commissions"].append(commissionReport.commission)
-
-    def orderStatus(
-        self,
-        orderId: OrderId,
-        status: str,
-        filled: float,
-        remaining: float,
-        avgFillPrice: float,
-        permId: int,
-        parentId: int,
-        lastFillPrice: float,
-        clientId: int,
-        whyHeld: str,
-        mktCapPrice: float,
-    ) -> None:
-        logger.debug(
-            "Order %s → %s (filled=%.2f @ %.4f)",
-            orderId, status, filled, avgFillPrice,
-        )
-        if status == "Filled" and orderId in self._fill_events:
-            data = self._fills.setdefault(
-                orderId, {"executions": [], "commissions": [], "filled": False}
-            )
-            data["avg_fill_price"] = avgFillPrice
-            data["filled_qty"] = filled
-            data["filled"] = True
-            self._fill_events[orderId].set()
-
-    # ── Positions ──────────────────────────────────────────────────────────────
-
-    def position(self, account: str, contract: Contract, position: float, avgCost: float) -> None:
-        self._positions.append({
-            "symbol": contract.symbol,
-            "quantity": position,
-            "average_cost": avgCost,
-        })
-
-    def positionEnd(self) -> None:
-        self._positions_event.set()
-
-    # ── Account summary ────────────────────────────────────────────────────────
-
-    def accountSummary(self, reqId: int, account: str, tag: str, value: str, currency: str) -> None:
-        self._account_values[tag] = value
-
-    def accountSummaryEnd(self, reqId: int) -> None:
-        self._account_event.set()
-
 
 class IBKRBroker(BrokerInterface):
-    """Interactive Brokers broker implementation using the official ibapi library.
+    """Interactive Brokers broker using the IBKR Web API (Client Portal Gateway).
 
-    Runs EClient.run() in a daemon thread. All async methods bridge to ibapi
-    callbacks via threading.Event without blocking the asyncio event loop.
+    Requires the IB Client Portal Gateway to be running locally (default port 5000)
+    with an active authenticated session.  Auth is handled by the Gateway; this
+    client only needs to POST /tickle every 60 s to keep the session alive.
     """
 
     def __init__(self, settings: Settings) -> None:
-        self._app = _IBKRApp()
         self._settings = settings
-        self._thread: threading.Thread | None = None
-        self._req_counter: int = 2000  # starting reqId for data requests
+        self._base_url = f"https://{settings.ibkr_host}:{settings.ibkr_port}/v1/api"
+        # CP Gateway uses a self-signed TLS cert — disable verification for local use.
+        self._client = httpx.AsyncClient(verify=False, timeout=30.0)
+        self._account_id: str | None = None
+        self._conid_cache: dict[str, int] = {}
+        self._tickle_task: asyncio.Task | None = None
+        self._connected = False
 
     # ── Connection ─────────────────────────────────────────────────────────────
 
     async def connect(self) -> None:
         logger.info(
-            "Connecting to IBKR %s on %s:%s (clientId=%s)",
+            "Connecting to IBKR Web API at %s (mode=%s)",
+            self._base_url,
             self._settings.trading_mode.value.upper(),
-            self._settings.ibkr_host,
-            self._settings.ibkr_port,
-            self._settings.ibkr_client_id,
         )
 
-        self._app._loop = asyncio.get_running_loop()
-        self._app.connect(
-            self._settings.ibkr_host,
-            self._settings.ibkr_port,
-            self._settings.ibkr_client_id,
-        )
-        self._thread = threading.Thread(target=self._app.run, daemon=True, name="ibapi-thread")
-        self._thread.start()
+        # Verify Gateway is running and the session is authenticated.
+        # Retry a few times in case the brokerage session needs initialisation.
+        for attempt in range(3):
+            try:
+                r = await self._client.get(f"{self._base_url}/iserver/auth/status")
+                r.raise_for_status()
+                status = r.json()
+                if status.get("authenticated"):
+                    break
+                # Session connected but not authenticated — ask Gateway to init it.
+                await self._client.post(
+                    f"{self._base_url}/iserver/auth/ssodh/init",
+                    json={"compete": True, "publish": True},
+                )
+                await asyncio.sleep(2)
+            except Exception as exc:
+                if attempt == 2:
+                    raise ConnectionError(
+                        f"Cannot reach IBKR Web API at {self._base_url}: {exc}. "
+                        "Make sure IB Client Portal Gateway is running and you are "
+                        "logged in via the browser."
+                    ) from exc
+                await asyncio.sleep(2)
 
-        connected = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: self._app._connected.wait(timeout=15)
-        )
-        if not connected:
-            raise ConnectionError(
-                f"Timed out connecting to IBKR on port {self._settings.ibkr_port}. "
-                "Make sure IB Gateway is running with API connections enabled."
-            )
-
-        # Request delayed market data (type 3) as fallback when the account
-        # doesn't have a real-time data subscription.  Type 4 = delayed-frozen.
-        # This avoids error 420 "No market data permissions for ISLAND STK".
-        self._app.reqMarketDataType(3)
-        logger.info("IBKR broker ready (market data: delayed).")
+        self._account_id = await self._get_account_id()
+        self._connected = True
+        self._tickle_task = asyncio.create_task(self._tickle_loop())
+        logger.info("IBKR Web API connected. Account: %s", self._account_id)
 
     async def disconnect(self) -> None:
-        if self._app.isConnected():
-            self._app.disconnect()
-            logger.info("Disconnected from IBKR.")
+        self._connected = False
+        if self._tickle_task:
+            self._tickle_task.cancel()
+            try:
+                await self._tickle_task
+            except asyncio.CancelledError:
+                pass
+        await self._client.aclose()
+        logger.info("Disconnected from IBKR Web API.")
 
     @property
     def is_connected(self) -> bool:
-        return self._app.isConnected()
+        return self._connected
 
     # ── Orders ─────────────────────────────────────────────────────────────────
 
     async def place_order(self, order: Order) -> Fill:
-        order_id = self._app._next_order_id
-        self._app._next_order_id += 1
-
-        contract = self._make_contract(order.symbol)
-        ib_order = self._make_ib_order(order, order_id)
-
-        event = threading.Event()
-        self._app._fill_events[order_id] = event
-        self._app._fills[order_id] = {"executions": [], "commissions": [], "filled": False}
+        conid = await self.resolve_conid(order.symbol)
+        payload = self._build_order_payload(conid, order)
 
         logger.info(
             "Placing %s %s order: %.2f x %s",
             order.order_type.value, order.side.value, order.quantity, order.symbol,
         )
-        self._app.placeOrder(order_id, contract, ib_order)
 
-        filled = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: event.wait(timeout=30)
+        r = await self._client.post(
+            f"{self._base_url}/iserver/account/{self._account_id}/orders",
+            json={"orders": [payload]},
         )
-        if not filled:
-            raise TimeoutError(
-                f"Order {order_id} ({order.symbol}) timed out waiting for fill after 30s."
-            )
+        r.raise_for_status()
+        result = r.json()
 
-        data = self._app._fills[order_id]
-        avg_price = data.get("avg_fill_price", order.limit_price or 0.0)
-        filled_qty = data.get("filled_qty", order.quantity)
-        commission = sum(data.get("commissions", []))
+        # The Web API sometimes requires confirmation of a reply message before
+        # the order is submitted.  Loop until we get an order_id in the response.
+        while isinstance(result, list) and result and "id" in result[0]:
+            reply_id = result[0]["id"]
+            logger.debug("Confirming order reply: %s", reply_id)
+            r = await self._client.post(
+                f"{self._base_url}/iserver/reply/{reply_id}",
+                json={"confirmed": True},
+            )
+            r.raise_for_status()
+            result = r.json()
+
+        order_data = result[0] if isinstance(result, list) and result else result
+        order_id = str(order_data.get("order_id", order_data.get("orderId", "unknown")))
+
+        fill_price = await self._wait_for_fill(order_id, order)
 
         fill = Fill(
-            order_id=str(order_id),
+            order_id=order_id,
             symbol=order.symbol,
             side=order.side,
-            filled_quantity=filled_qty,
-            average_price=avg_price,
-            commission=commission,
+            filled_quantity=order.quantity,
+            average_price=fill_price,
+            commission=0.0,
             timestamp=datetime.now(timezone.utc),
         )
-        logger.info("Fill: %s %s @ %.4f (commission: %.4f)", fill.side.value, fill.symbol, fill.average_price, fill.commission)
+        logger.info(
+            "Fill: %s %s @ %.4f", fill.side.value, fill.symbol, fill.average_price
+        )
         return fill
 
     async def cancel_order(self, order_id: str) -> None:
-        self._app.cancelOrder(int(order_id), "")
-        logger.info("Cancel request sent for order %s.", order_id)
+        r = await self._client.delete(
+            f"{self._base_url}/iserver/account/{self._account_id}/order/{order_id}"
+        )
+        r.raise_for_status()
+        logger.info("Cancelled order %s.", order_id)
 
     # ── Account / Positions ────────────────────────────────────────────────────
 
     async def get_positions(self) -> list[Position]:
-        self._app._positions = []
-        self._app._positions_event.clear()
-        self._app.reqPositions()
+        # /portfolio/accounts must be called first to initialise the portfolio session.
+        await self._client.get(f"{self._base_url}/portfolio/accounts")
 
-        done = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: self._app._positions_event.wait(timeout=10)
+        r = await self._client.get(
+            f"{self._base_url}/portfolio/{self._account_id}/positions/0"
         )
-        self._app.cancelPositions()
-        if not done:
-            logger.warning("Timed out waiting for positions response.")
-            return []
+        r.raise_for_status()
 
         return [
-            Position(symbol=p["symbol"], quantity=p["quantity"], average_cost=p["average_cost"])
-            for p in self._app._positions
-            if p["quantity"] != 0
+            Position(
+                symbol=p.get("contractDesc", p.get("ticker", str(p.get("conid", "")))),
+                quantity=float(p["position"]),
+                average_cost=float(p.get("avgCost", p.get("avgPrice", 0))),
+                unrealized_pnl=float(p.get("unrealizedPnl", 0)),
+            )
+            for p in r.json()
+            if float(p.get("position", 0)) != 0
         ]
 
     async def get_account_summary(self) -> AccountSummary:
-        req_id = self.next_req_id()
-        self._app._account_values = {}
-        self._app._account_event.clear()
-        self._app.reqAccountSummary(req_id, "All", "NetLiquidation,BuyingPower,TotalCashValue")
+        await self._client.get(f"{self._base_url}/portfolio/accounts")
 
-        done = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: self._app._account_event.wait(timeout=10)
+        r = await self._client.get(
+            f"{self._base_url}/portfolio/{self._account_id}/summary"
         )
-        self._app.cancelAccountSummary(req_id)
-        if not done:
-            logger.warning("Timed out waiting for account summary.")
+        r.raise_for_status()
+        data = r.json()
 
-        vals = self._app._account_values
+        def _amt(key: str) -> float:
+            val = data.get(key, {})
+            return float(val.get("amount", 0)) if isinstance(val, dict) else float(val or 0)
+
         return AccountSummary(
-            net_liquidation=float(vals.get("NetLiquidation", 0)),
-            buying_power=float(vals.get("BuyingPower", 0)),
-            cash_balance=float(vals.get("TotalCashValue", 0)),
+            net_liquidation=_amt("netliquidationvalue"),
+            buying_power=_amt("buyingpower"),
+            cash_balance=_amt("totalcashvalue"),
         )
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
+    # ── Public helpers (used by MarketDataFeed) ────────────────────────────────
 
-    def next_req_id(self) -> int:
-        self._req_counter += 1
-        return self._req_counter
+    async def resolve_conid(self, symbol: str) -> int:
+        """Resolve a ticker symbol to an IBKR contract ID, with caching."""
+        if symbol in self._conid_cache:
+            return self._conid_cache[symbol]
 
-    @property
-    def app(self) -> _IBKRApp:
-        """Expose the underlying _IBKRApp for use by MarketDataFeed."""
-        return self._app
+        r = await self._client.post(
+            f"{self._base_url}/iserver/secdef/search",
+            json={"symbol": symbol, "name": False, "secType": "STK"},
+        )
+        r.raise_for_status()
+        results = r.json()
+
+        if not results:
+            raise ValueError(f"No contract found for symbol: {symbol}")
+
+        # Prefer a US-listed stock (NASDAQ, NYSE, ARCA, BATS).
+        conid: int | None = None
+        for item in results:
+            if item.get("description", "").upper() in ("NASDAQ", "NYSE", "ARCA", "BATS"):
+                conid = int(item["conid"])
+                break
+        if conid is None:
+            conid = int(results[0]["conid"])
+
+        self._conid_cache[symbol] = conid
+        logger.debug("Resolved %s → conid %d", symbol, conid)
+        return conid
+
+    # ── Private helpers ────────────────────────────────────────────────────────
+
+    async def _get_account_id(self) -> str:
+        r = await self._client.get(f"{self._base_url}/iserver/accounts")
+        r.raise_for_status()
+        data = r.json()
+        accounts = data.get("accounts", data) if isinstance(data, dict) else data
+        if not accounts:
+            raise RuntimeError("No IBKR accounts found.")
+        return accounts[0]
+
+    async def _wait_for_fill(self, order_id: str, order: Order) -> float:
+        """Poll /iserver/account/orders until the order is filled (up to 60 s)."""
+        for _ in range(12):           # 12 × 5 s = 60 s total
+            await asyncio.sleep(5)
+            try:
+                r = await self._client.get(f"{self._base_url}/iserver/account/orders")
+                r.raise_for_status()
+                for o in r.json().get("orders", []):
+                    if str(o.get("orderId", "")) == order_id:
+                        if o.get("status") in ("Filled", "PreSubmitted"):
+                            return float(o.get("avgPrice", order.limit_price or 0.0))
+            except Exception as exc:
+                logger.debug("Order status check failed: %s", exc)
+
+        logger.warning(
+            "Order %s fill not confirmed within 60 s; using limit/market price.", order_id
+        )
+        return order.limit_price or 0.0
+
+    async def _tickle_loop(self) -> None:
+        """Keep the Gateway session alive by POSTing /tickle every 60 s."""
+        while self._connected:
+            await asyncio.sleep(60)
+            try:
+                await self._client.post(f"{self._base_url}/tickle")
+            except Exception as exc:
+                logger.warning("Tickle failed: %s", exc)
 
     @staticmethod
-    def _make_contract(symbol: str) -> Contract:
-        c = Contract()
-        c.symbol = symbol
-        c.secType = "STK"
-        c.exchange = "SMART"
-        c.currency = "USD"
-        return c
-
-    @staticmethod
-    def _make_ib_order(order: Order, order_id: int) -> IBOrder:
-        ib = IBOrder()
-        ib.orderId = order_id
-        ib.action = order.side.value          # "BUY" or "SELL"
-        ib.totalQuantity = order.quantity
+    def _build_order_payload(conid: int, order: Order) -> dict:
+        payload: dict = {
+            "conid": conid,
+            "side": order.side.value,   # "BUY" or "SELL"
+            "quantity": order.quantity,
+            "tif": "DAY",
+        }
 
         if order.order_type == OrderType.MARKET:
-            ib.orderType = "MKT"
+            payload["orderType"] = "MKT"
         elif order.order_type == OrderType.LIMIT:
             if order.limit_price is None:
                 raise ValueError("limit_price is required for LIMIT orders.")
-            ib.orderType = "LMT"
-            ib.lmtPrice = order.limit_price
+            payload["orderType"] = "LMT"
+            payload["price"] = order.limit_price
         elif order.order_type == OrderType.STOP:
             if order.stop_price is None:
                 raise ValueError("stop_price is required for STOP orders.")
-            ib.orderType = "STP"
-            ib.auxPrice = order.stop_price
+            payload["orderType"] = "STP"
+            payload["price"] = order.stop_price
         else:
             raise ValueError(f"Unsupported order type: {order.order_type}")
 
-        return ib
+        return payload

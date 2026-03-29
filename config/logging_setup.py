@@ -67,6 +67,5 @@ def configure_logging(log_level: str = "INFO", log_to_file: bool = True) -> None
     )
 
     # Quieten noisy third-party loggers
-    logging.getLogger("ibapi").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)

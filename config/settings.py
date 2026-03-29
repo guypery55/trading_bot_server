@@ -1,25 +1,12 @@
 from __future__ import annotations
 
 from enum import Enum
-from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class TradingMode(str, Enum):
     PAPER = "paper"
     LIVE = "live"
-
-
-class ConnectionType(str, Enum):
-    TWS = "tws"
-    GATEWAY = "gateway"
-
-
-# Default IBKR ports per mode + connection type
-_IBKR_PORTS: dict[TradingMode, dict[ConnectionType, int]] = {
-    TradingMode.PAPER: {ConnectionType.TWS: 7497, ConnectionType.GATEWAY: 4002},
-    TradingMode.LIVE:  {ConnectionType.TWS: 7496, ConnectionType.GATEWAY: 4001},
-}
 
 
 class Settings(BaseSettings):
@@ -30,15 +17,14 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # IBKR connection
+    # IBKR Web API (Client Portal Gateway)
     ibkr_host: str = "127.0.0.1"
-    ibkr_connection_type: ConnectionType = ConnectionType.GATEWAY
-    ibkr_port: int | None = None
-    ibkr_client_id: int = 1
+    ibkr_port: int = 5000           # CP Gateway default port
+    ibkr_client_id: int = 1         # unused by Web API, kept for .env compatibility
 
     # Trading
     trading_mode: TradingMode = TradingMode.PAPER
-    symbols: str = "AAPL"       # comma-separated — use .symbol_list for a list
+    symbols: str = "AAPL"           # comma-separated — use .symbol_list for a list
     bar_size: str = "5 mins"
     strategy: str = "swing"
 
@@ -57,14 +43,6 @@ class Settings(BaseSettings):
     def symbol_list(self) -> list[str]:
         """Return symbols as a list, split on commas."""
         return [s.strip() for s in self.symbols.split(",") if s.strip()]
-
-    @model_validator(mode="after")
-    def resolve_port(self) -> Settings:
-        """Auto-derive IBKR port from trading_mode + connection_type if not set."""
-        if self.ibkr_port is None:
-            derived = _IBKR_PORTS[self.trading_mode][self.ibkr_connection_type]
-            object.__setattr__(self, "ibkr_port", derived)
-        return self
 
     @property
     def notifications_enabled(self) -> bool:
