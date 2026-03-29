@@ -9,6 +9,11 @@ logger = logging.getLogger(__name__)
 # Type alias for bar callbacks registered by the engine.
 BarCallback = Callable[[pd.DataFrame], Awaitable[None]]
 
+# Seconds to wait before each successive retry on a 429 / 503 pacing response.
+# The Gateway's penalty box lasts 10 minutes, so if we somehow still hit a
+# limit we back off hard rather than hammering and extending the ban.
+_RETRY_DELAYS: tuple[int, ...] = (10, 30, 60)
+
 # Map ibapi-style bar-size strings to Web API format.
 _BAR_SIZE_MAP: dict[str, str] = {
     "1 min":   "1min",  "1 mins":  "1min",
@@ -64,7 +69,12 @@ class MarketDataFeed:
     # ── Historical data ────────────────────────────────────────────────────────
 
     async def load_history(self, lookback_days: int = 30) -> pd.DataFrame:
-        """Fetch historical OHLCV bars from the IBKR Web API."""
+        """Fetch historical OHLCV bars from the IBKR Web API.
+
+        Retries up to 3 times on 429 / 503 (pacing violations) using the
+        back-off schedule in _RETRY_DELAYS before giving up and returning
+        whatever bars were collected so far.
+        """
         conid = await self._broker.resolve_conid(self._symbol)
         period = f"{lookback_days}d"
 
@@ -73,27 +83,52 @@ class MarketDataFeed:
             period, self._symbol, self._bar_size,
         )
 
-        try:
-            r = await self._broker._client.get(
-                f"{self._broker._base_url}/iserver/marketdata/history",
-                params={
-                    "conid": conid,
-                    "period": period,
-                    "bar": self._bar_size,
-                    "outsideRth": False,
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as exc:
-            logger.warning("Failed to fetch history for %s: %s", self._symbol, exc)
+        delays = (0, *_RETRY_DELAYS)   # first attempt has no pre-delay
+        for attempt, wait in enumerate(delays):
+            if wait:
+                logger.warning(
+                    "History pacing limit hit for %s — waiting %ds before retry %d/%d.",
+                    self._symbol, wait, attempt, len(_RETRY_DELAYS),
+                )
+                await asyncio.sleep(wait)
+
+            try:
+                r = await self._broker._client.get(
+                    f"{self._broker._base_url}/iserver/marketdata/history",
+                    params={
+                        "conid": conid,
+                        "period": period,
+                        "bar": self._bar_size,
+                        "outsideRth": False,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("History request failed for %s: %s", self._symbol, exc)
+                continue
+
+            if r.status_code in (429, 503):
+                if attempt < len(_RETRY_DELAYS):
+                    continue        # retry with next back-off delay
+                logger.error(
+                    "Giving up on history for %s after %d attempts (last status %d).",
+                    self._symbol, attempt + 1, r.status_code,
+                )
+                return self.to_dataframe()
+
+            try:
+                r.raise_for_status()
+                data = r.json()
+            except Exception as exc:
+                logger.warning("Failed to parse history for %s: %s", self._symbol, exc)
+                return self.to_dataframe()
+
+            self._bars = [self._parse_bar(b) for b in data.get("data", [])]
+            if self._bars:
+                self._last_bar_time = self._bars[-1]["_t"]
+
+            logger.info("Loaded %d historical bars for %s.", len(self._bars), self._symbol)
             return self.to_dataframe()
 
-        self._bars = [self._parse_bar(b) for b in data.get("data", [])]
-        if self._bars:
-            self._last_bar_time = self._bars[-1]["_t"]
-
-        logger.info("Loaded %d historical bars for %s.", len(self._bars), self._symbol)
         return self.to_dataframe()
 
     # ── Real-time streaming (polling) ──────────────────────────────────────────
@@ -137,8 +172,8 @@ class MarketDataFeed:
             await self._fetch_and_emit()
 
     async def _fetch_and_emit(self) -> None:
+        conid = await self._broker.resolve_conid(self._symbol)
         try:
-            conid = await self._broker.resolve_conid(self._symbol)
             r = await self._broker._client.get(
                 f"{self._broker._base_url}/iserver/marketdata/history",
                 params={
@@ -148,6 +183,18 @@ class MarketDataFeed:
                     "outsideRth": False,
                 },
             )
+        except Exception as exc:
+            logger.warning("Polling request failed for %s: %s", self._symbol, exc)
+            return
+
+        if r.status_code in (429, 503):
+            logger.warning(
+                "Polling pacing limit (%d) for %s — skipping this interval.",
+                r.status_code, self._symbol,
+            )
+            return
+
+        try:
             r.raise_for_status()
             data = r.json()
         except Exception as exc:

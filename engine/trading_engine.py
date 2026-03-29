@@ -57,23 +57,27 @@ class TradingEngine:
         for feed, strategy in self._feeds:
             strategy.on_start()
 
-        # Load history sequentially — one at a time with a 1 s gap.
-        # IBKR silently drops requests that arrive simultaneously even when
-        # within the "6 concurrent" limit, so sequential is most reliable.
+        # Load history strictly sequentially with a gap between each request.
+        # The Web API allows max 5 *concurrent* history requests and issues a
+        # 503 (pacing violation) if that is exceeded or requests arrive too fast.
+        # 3 s between requests keeps us well under the limit and avoids the
+        # 10-minute penalty box.  load_history() also retries internally on
+        # 429/503, so a one-off pacing hit won't abort the whole startup.
+        _GAP_S = 3.0
         total = len(self._feeds)
         for i, (feed, _) in enumerate(self._feeds):
             logger.info("Loading history [%d/%d] — %s", i + 1, total, feed._symbol)
             await feed.load_history(lookback_days=60)
             if i < total - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(_GAP_S)
 
-        # Subscribe bar handlers and start streaming — stagger slightly to
-        # avoid hitting IBKR's historical data pacing limits (50 req/10 s).
+        # Subscribe bar handlers and start streaming — stagger slightly so
+        # the first round of poll requests don't all fire at the same instant.
         for i, (feed, strategy) in enumerate(self._feeds):
             feed.subscribe(self._make_bar_handler(strategy))
             await feed.start_streaming()
             if i < len(self._feeds) - 1:
-                await asyncio.sleep(0.25)   # ~4 streams/sec → safe under limits
+                await asyncio.sleep(0.5)
 
         logger.info("Engine running. Streaming bars for %d symbol(s).", len(self._feeds))
 
