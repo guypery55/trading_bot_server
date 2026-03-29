@@ -3,6 +3,7 @@
 This is the only file that instantiates concrete classes and wires them together.
 All other modules receive their dependencies via constructor injection.
 """
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -15,29 +16,41 @@ from data.market_data import MarketDataFeed
 from engine.risk_manager import RiskManager
 from engine.trading_engine import TradingEngine
 from portfolio.portfolio_tracker import PortfolioTracker
-from storage.trade_logger import TradeLogger
 from strategy.base import BaseStrategy
 from strategy.breakout_strategy import BreakoutStrategy
 from strategy.rsi_macd_strategy import RSIMACDStrategy
+from strategy.swing_strategy import SwingStrategy
 
-# ── Strategy registry ─────────────────────────────────────────────────────────
-# Add new strategies here. One line per strategy, no other files need to change.
+# ── Strategy registry ──────────────────────────────────────────────────────────
+# Add new strategies here — no other files need to change.
 STRATEGY_REGISTRY: dict[str, type[BaseStrategy]] = {
     "rsi_macd": RSIMACDStrategy,
     "breakout": BreakoutStrategy,
+    "swing": SwingStrategy,
 }
 
 logger = logging.getLogger(__name__)
 
 
-def build_strategy(settings: Settings) -> BaseStrategy:
+def build_feeds(
+    broker: IBKRBroker,
+    settings: Settings,
+) -> list[tuple[MarketDataFeed, BaseStrategy]]:
+    """Create one (MarketDataFeed, Strategy) pair per symbol."""
     strategy_cls = STRATEGY_REGISTRY.get(settings.strategy)
     if strategy_cls is None:
         available = ", ".join(STRATEGY_REGISTRY.keys())
         raise ValueError(
             f"Unknown strategy '{settings.strategy}'. Available: {available}"
         )
-    return strategy_cls(symbol=settings.symbol)
+
+    feeds = []
+    for symbol in settings.symbol_list:
+        feed = MarketDataFeed(broker, symbol, settings.bar_size)
+        strategy = strategy_cls(symbol=symbol)
+        feeds.append((feed, strategy))
+
+    return feeds
 
 
 async def main() -> None:
@@ -47,19 +60,23 @@ async def main() -> None:
 
     logger.info("=" * 60)
     logger.info("  Trading Bot Server")
-    logger.info("  Mode    : %s", settings.trading_mode.value.upper())
-    logger.info("  Symbol  : %s", settings.symbol)
-    logger.info("  Strategy: %s", settings.strategy)
-    logger.info("  IBKR    : %s:%s (clientId=%s)", settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id)
+    logger.info("  Mode      : %s", settings.trading_mode.value.upper())
+    logger.info("  Strategy  : %s", settings.strategy)
+    symbols = settings.symbol_list
+    logger.info("  Symbols   : %d  (%s)", len(symbols), ", ".join(symbols[:5]) + ("..." if len(symbols) > 5 else ""))
+    logger.info("  Spend cap : $%.2f / day", settings.daily_spend_limit)
+    logger.info("  Loss limit: $%.2f / day", settings.daily_loss_limit)
+    logger.info("  IBKR      : %s:%s (clientId=%s)", settings.ibkr_host, settings.ibkr_port, settings.ibkr_client_id)
     logger.info("=" * 60)
 
     # ── Build dependencies ────────────────────────────────────────────────────
     broker = IBKRBroker(settings)
-    strategy = build_strategy(settings)
-    risk_manager = RiskManager()
+    feeds = build_feeds(broker, settings)
+    risk_manager = RiskManager(
+        daily_loss_limit=settings.daily_loss_limit,
+        daily_spend_limit=settings.daily_spend_limit,
+    )
     portfolio = PortfolioTracker()
-    trade_logger = TradeLogger(settings.database_url)
-    market_data = MarketDataFeed(broker.ib, settings.symbol, settings.bar_size)
 
     # Optional Telegram notifier
     notifier = None
@@ -70,11 +87,9 @@ async def main() -> None:
     # ── Wire the engine ───────────────────────────────────────────────────────
     engine = TradingEngine(
         broker=broker,
-        strategy=strategy,
+        feeds=feeds,
         risk_manager=risk_manager,
-        market_data=market_data,
         portfolio=portfolio,
-        trade_logger=trade_logger,
         notifier=notifier,
     )
 

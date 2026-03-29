@@ -27,8 +27,8 @@ class RSIMACDStrategy(BaseStrategy):
 
     DEFAULT_PARAMS = {
         "rsi_period": 14,
-        "oversold_threshold": 30,
-        "overbought_threshold": 70,
+        "oversold_threshold": 40,    # was 30 — wider zone = more signals
+        "overbought_threshold": 60,  # was 70 — wider zone = more signals
         "macd_fast": 12,
         "macd_slow": 26,
         "macd_signal": 9,

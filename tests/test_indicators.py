@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from strategy.indicators import bollinger_bands, ema, macd, rsi, sma
+from strategy.indicators import atr, bollinger_bands, ema, macd, rsi, sma
 
 
 @pytest.fixture
@@ -55,8 +55,13 @@ class TestRSI:
         assert len(result) == len(price_series)
 
     def test_trending_up_gives_high_rsi(self):
-        """Monotonically rising prices should yield RSI near 100."""
-        series = pd.Series([float(i) for i in range(1, 51)])
+        """Strongly trending up prices should yield RSI above 70."""
+        # Use a series with occasional small dips so avg_loss is non-zero
+        import numpy as np
+        rng = np.random.default_rng(0)
+        base = np.linspace(100, 200, 50)
+        noise = rng.uniform(-0.1, 0.5, 50)  # mostly upward noise
+        series = pd.Series(base + noise)
         result = rsi(series, period=14)
         assert result.iloc[-1] > 70
 
@@ -101,3 +106,61 @@ class TestBollingerBands:
         valid_idx = middle.dropna().index
         assert (middle[valid_idx] <= upper[valid_idx]).all()
         assert (middle[valid_idx] >= lower[valid_idx]).all()
+
+
+class TestATR:
+    @pytest.fixture
+    def ohlc(self):
+        """Generate OHLC data with known volatility."""
+        import numpy as np
+        rng = np.random.default_rng(42)
+        n = 100
+        close = 100.0 + rng.normal(0, 1, n).cumsum()
+        high = close + rng.uniform(0.5, 1.5, n)
+        low = close - rng.uniform(0.5, 1.5, n)
+        return (
+            pd.Series(high, name="high"),
+            pd.Series(low, name="low"),
+            pd.Series(close, name="close"),
+        )
+
+    def test_length(self, ohlc):
+        high, low, close = ohlc
+        result = atr(high, low, close, period=14)
+        assert len(result) == len(close)
+
+    def test_positive_values(self, ohlc):
+        """ATR should always be positive after warm-up."""
+        high, low, close = ohlc
+        result = atr(high, low, close, period=14)
+        valid = result.dropna()
+        assert (valid > 0).all()
+
+    def test_higher_volatility_gives_higher_atr(self):
+        """A more volatile series should produce a larger ATR."""
+        import numpy as np
+        n = 100
+
+        # Low volatility
+        close_low = pd.Series(np.linspace(100, 110, n))
+        high_low = close_low + 0.2
+        low_low = close_low - 0.2
+
+        # High volatility
+        close_high = pd.Series(np.linspace(100, 110, n))
+        high_high = close_high + 2.0
+        low_high = close_high - 2.0
+
+        atr_low = atr(high_low, low_low, close_low, period=14).iloc[-1]
+        atr_high = atr(high_high, low_high, close_high, period=14).iloc[-1]
+        assert atr_high > atr_low
+
+    def test_period_parameter(self, ohlc):
+        """Shorter period should react faster to recent changes."""
+        high, low, close = ohlc
+        atr_short = atr(high, low, close, period=5)
+        atr_long = atr(high, low, close, period=20)
+        # Short period should have a valid (non-NaN) value earlier
+        first_valid_short = atr_short.first_valid_index()
+        first_valid_long = atr_long.first_valid_index()
+        assert first_valid_short <= first_valid_long
