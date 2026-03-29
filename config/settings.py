@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     # Trading
     trading_mode: TradingMode = TradingMode.PAPER
     symbols: str = "AAPL"           # comma-separated — use .symbol_list for a list
-    bar_size: str = "5 mins"
+    bar_size: str = "30 mins"
     strategy: str = "swing"
 
     # Risk
